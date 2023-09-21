@@ -1,62 +1,62 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 
-pub fn open_process(pid: u32) -> File {
-    let path = format!("/proc/{}/mem", pid);
-
-    let file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(value) => value,
-        Err(error) => panic!("Problem opening the file: {:?}", error),
-    };
-
-    file
+pub struct ProcessMemory {
+    file: File,
 }
 
-pub fn read_mem<T: ByteConversion>(process_file: &mut File, offset: u64, result: &mut T) {
-    process_file
-        .seek(SeekFrom::Start(offset))
-        .expect("Couldn't seek offset");
+impl ProcessMemory {
+    pub fn open(pid: u32) -> io::Result<ProcessMemory> {
+        let path = format!("/proc/{}/mem", pid);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(path)?;
 
-    let size = std::mem::size_of::<T>();
+        Ok(ProcessMemory { file })
+    }
 
-    let mut buf: Vec<u8> = Vec::with_capacity(size);
-    buf.resize(size, 0);
+    pub fn read<T: ByteConversion>(&mut self, offset: u64) -> io::Result<T> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let size = std::mem::size_of::<T>();
+        let mut buf = vec![0; size];
+        self.file.read_exact(&mut buf)?;
 
-    process_file
-        .read(&mut buf[..])
-        .expect("Failed to read address");
+        match T::from_bytes(&buf) {
+            Some(value) => Ok(value),
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid data at the specified offset",
+            )),
+        }
+    }
 
-    *result = result.from_bytes(buf);
+    pub fn write<T: ByteConversion>(&mut self, offset: u64, value: T) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let buf = value.to_bytes();
+        self.file.write_all(&buf)?;
+
+        Ok(())
+    }
 }
 
-pub fn write_mem<T: ByteConversion>(process_file: &mut File, offset: u64, value: T) {
-    process_file
-        .seek(SeekFrom::Start(offset))
-        .expect("Couldn't seek offset");
-
-    let buf = value.to_bytes();
-
-    process_file
-        .write(&buf[..])
-        .expect("Failed to write address");
-}
-
-pub trait ByteConversion {
-    fn from_bytes(&self, bytes: Vec<u8>) -> Self;
+pub trait ByteConversion: Sized {
+    fn from_bytes(bytes: &[u8]) -> Option<Self>;
     fn to_bytes(&self) -> Vec<u8>;
 }
 
 impl ByteConversion for i32 {
-    fn from_bytes(&self, bytes: Vec<u8>) -> Self {
-        let converted = i32::from_ne_bytes(bytes.try_into().expect("Couldn't convert bytes"));
-        converted
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() == std::mem::size_of::<i32>() {
+            Some(i32::from_ne_bytes(
+                bytes.try_into().expect("Failed to convert bytes to i32"),
+            ))
+        } else {
+            None
+        }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
